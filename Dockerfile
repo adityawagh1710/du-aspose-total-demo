@@ -65,7 +65,7 @@ RUN cmake -S worker_cpp -B build \
 # vendor/ (the Aspose C++ libs) is deliberately NOT copied, so Go does not
 # enter vendor mode; go.sum drives a reproducible module build.
 # =============================================================================
-FROM golang:1.26-bookworm AS gobuilder
+FROM golang:1.27-bookworm AS gobuilder
 
 WORKDIR /src
 COPY go.mod go.sum ./
