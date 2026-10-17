@@ -151,8 +151,8 @@ func (srv *Server) convert(w http.ResponseWriter, r *http.Request) {
 		di.s3OutBucket, di.s3OutKey, di.hasS3Out = bucket, key, true
 	}
 
-	scratchDir := joinScratch(s.ScratchDir, rid)
-	if err := ensureDir(scratchDir); err != nil {
+	scratchDir, err := newScratchDir(s.ScratchDir, rid)
+	if err != nil {
 		srv.writeError(w, rid, oerrors.NewRender(nil, -1, "scratch mkdir: "+err.Error()))
 		return
 	}

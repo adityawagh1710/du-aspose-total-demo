@@ -14,7 +14,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,7 +109,7 @@ func (srv *Server) Handler() http.Handler {
 func (srv *Server) requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rid := r.Header.Get("X-Request-ID")
-		if rid == "" {
+		if !validRequestID(rid) {
 			rid = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", rid)
@@ -338,6 +337,20 @@ func (srv *Server) presign(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---
 
+// validRequestID reports whether a client-supplied X-Request-ID is safe to
+// echo, log and embed in file names: 1-64 chars of [A-Za-z0-9_-].
+func validRequestID(rid string) bool {
+	if len(rid) == 0 || len(rid) > 64 {
+		return false
+	}
+	for _, c := range rid {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func newRequestID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
@@ -482,6 +495,12 @@ func fileSize(path string) int64 {
 	return 0
 }
 
-func ensureDir(p string) error { return os.MkdirAll(p, 0o755) }
-
-func joinScratch(base, rid string) string { return filepath.Join(base, rid) }
+// newScratchDir creates a fresh, uniquely named per-request directory under
+// base. The name is never just the request ID, so a duplicated X-Request-ID
+// can't share (and then RemoveAll) another request's scratch.
+func newScratchDir(base, rid string) (string, error) {
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(base, rid+"-")
+}

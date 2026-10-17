@@ -105,8 +105,8 @@ func (srv *Server) convertHTML(w http.ResponseWriter, r *http.Request, engine st
 	defer file.Close()
 	di.inputFilename = fh.Filename
 
-	scratchDir := joinScratch(s.ScratchDir, rid)
-	if err := ensureDir(scratchDir); err != nil {
+	scratchDir, err := newScratchDir(s.ScratchDir, rid)
+	if err != nil {
 		srv.writeError(w, rid, oerrors.NewRender(nil, -1, "scratch mkdir: "+err.Error()))
 		return
 	}
