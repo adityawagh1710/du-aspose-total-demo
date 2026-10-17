@@ -19,6 +19,7 @@
 
 #include "pool.h"
 
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -28,6 +29,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -344,6 +346,10 @@ int child_render_loop(int sock_fd) {
             } catch (const std::exception& e) {
                 fd_write_line(sock_fd, make_response_error(seq, EXIT_RENDER_FAILURE,
                     std::string("render: ") + e.what()));
+            } catch (...) {
+                // Aspose::Cells::CellsException does not derive from std::exception.
+                fd_write_line(sock_fd, make_response_error(seq, EXIT_RENDER_FAILURE,
+                    "render: non-standard exception"));
             }
         }
     }
@@ -353,6 +359,8 @@ struct ChildSlot {
     pid_t pid = -1;
     int sock_fd = -1;
     bool busy = false;
+    bool dead = false;      // exited; never dispatched to or polled again
+    int in_flight_seq = -1; // seq of the command it is rendering, if busy
     LineAccumulator acc;
 };
 
@@ -360,6 +368,10 @@ struct ChildSlot {
 
 int pool_loop_forked(const std::string& format, const std::string& license_path, int pool_size) {
     (void)format;  // format is enforced structurally by the binary identity
+
+    // A write to a dead child's socket must fail with EPIPE, not kill the
+    // leader (and every in-flight chunk with it). Children inherit this.
+    ::signal(SIGPIPE, SIG_IGN);
 
     // License first (in leader, before fork — children inherit licensed state).
     try {
@@ -420,11 +432,24 @@ int pool_loop_forked(const std::string& format, const std::string& license_path,
             // CHILD: close leader's end of every prior socketpair, close stdin/stdout
             ::close(socks[0]);
             for (auto& c : children) ::close(c.sock_fd);
-            ::close(STDIN_FILENO);
-            ::close(STDOUT_FILENO);
+            // Point stdin/stdout at /dev/null rather than closing them, so a
+            // later open() inside Aspose can't be handed fd 0/1 and have stray
+            // stdout writes land inside a chunk PDF.
+            if (int devnull = ::open("/dev/null", O_RDWR); devnull >= 0) {
+                ::dup2(devnull, STDIN_FILENO);
+                ::dup2(devnull, STDOUT_FILENO);
+                if (devnull > STDERR_FILENO) ::close(devnull);
+            }
             // stderr stays open so heartbeats reach the orchestrator.
             g_pool_index = i;
-            _exit(child_render_loop(socks[1]));
+            // Never unwind out of a forked copy of a multithreaded process:
+            // atexit handlers and static destructors must not run here.
+            int rc = EXIT_RENDER_FAILURE;
+            try {
+                rc = child_render_loop(socks[1]);
+            } catch (...) {
+            }
+            _exit(rc);
         }
         // PARENT
         ::close(socks[1]);
@@ -445,14 +470,41 @@ int pool_loop_forked(const std::string& format, const std::string& license_path,
     bool stdin_open = true;
     bool quitting = false;
 
-    auto dispatch_to_child = [&](ChildSlot& c, const std::string& cmd_line) {
+    // A child that exits is retired: its in-flight command gets an error reply
+    // (otherwise the orchestrator waits out the full chunk timeout), and it is
+    // closed, reaped and never dispatched to again.
+    auto retire_child = [&](ChildSlot& c) {
+        if (c.busy && c.in_flight_seq >= 0) {
+            std::cout << make_response_error(c.in_flight_seq, EXIT_RENDER_FAILURE,
+                "forked render child exited") << std::endl;
+        }
+        if (c.sock_fd >= 0) ::close(c.sock_fd);
+        if (c.pid > 0) {
+            int status = 0;
+            ::waitpid(c.pid, &status, 0);
+        }
+        c.sock_fd = -1;
+        c.pid = -1;
+        c.busy = false;
+        c.in_flight_seq = -1;
+        c.dead = true;
+    };
+
+    auto dispatch_to_child = [&](ChildSlot& c, const std::string& cmd_line) -> bool {
         c.busy = true;
-        fd_write_line(c.sock_fd, cmd_line);
+        c.in_flight_seq = json_int(cmd_line, "seq");
+        if (fd_write_line(c.sock_fd, cmd_line)) return true;
+        // Child already gone (EPIPE). Retire it without replying: the caller
+        // keeps the command and hands it to another slot.
+        c.busy = false;
+        c.in_flight_seq = -1;
+        retire_child(c);
+        return false;
     };
 
     auto try_assign = [&](const std::string& cmd_line) -> bool {
         for (auto& c : children) {
-            if (!c.busy) { dispatch_to_child(c, cmd_line); return true; }
+            if (!c.dead && !c.busy && dispatch_to_child(c, cmd_line)) return true;
         }
         if (!leader_busy) {
             // Leader renders inline. This blocks the poll loop briefly, but
@@ -478,6 +530,9 @@ int pool_loop_forked(const std::string& format, const std::string& license_path,
                 } catch (const std::exception& e) {
                     std::cout << make_response_error(seq, EXIT_RENDER_FAILURE,
                         std::string("render: ") + e.what()) << std::endl;
+                } catch (...) {
+                    std::cout << make_response_error(seq, EXIT_RENDER_FAILURE,
+                        "render: non-standard exception") << std::endl;
                 }
             }
             leader_busy = false;
@@ -491,7 +546,9 @@ int pool_loop_forked(const std::string& format, const std::string& license_path,
                                                           [](const ChildSlot& c) { return c.busy; })) {
         std::vector<pollfd> pfds;
         if (stdin_open) pfds.push_back({STDIN_FILENO, POLLIN, 0});
-        for (auto& c : children) pfds.push_back({c.sock_fd, POLLIN, 0});
+        for (auto& c : children) {
+            if (!c.dead) pfds.push_back({c.sock_fd, POLLIN, 0});
+        }
 
         int n = ::poll(pfds.data(), pfds.size(), -1);
         if (n < 0) {
@@ -527,7 +584,8 @@ int pool_loop_forked(const std::string& format, const std::string& license_path,
         }
 
         for (auto& c : children) {
-            if (pfds[idx].revents & (POLLIN | POLLHUP)) {
+            if (c.dead) continue;  // not in pfds (same skip as when building it)
+            if (pfds[idx].revents & (POLLIN | POLLHUP | POLLERR)) {
                 std::vector<std::string> lines;
                 bool alive = c.acc.drain(c.sock_fd, lines);
                 for (auto& resp_line : lines) {
@@ -535,19 +593,21 @@ int pool_loop_forked(const std::string& format, const std::string& license_path,
                     // Forward verbatim to orchestrator stdout
                     std::cout << resp_line << std::endl;
                     c.busy = false;
+                    c.in_flight_seq = -1;
                     // Drain pending queue onto newly-free child
-                    if (!pending.empty()) {
-                        std::string next = pending.front();
+                    if (alive && !pending.empty() && dispatch_to_child(c, pending.front())) {
                         pending.pop_front();
-                        dispatch_to_child(c, next);
                     }
                 }
-                if (!alive) {
-                    // Child socket EOF — child died. Mark not busy so we don't wait forever.
-                    c.busy = false;
-                }
+                if (!alive) retire_child(c);
             }
             ++idx;
+        }
+
+        // Children may have died with work queued; hand it to whatever slot is
+        // free (another child, or the leader inline) instead of stalling.
+        while (!pending.empty() && try_assign(pending.front())) {
+            pending.pop_front();
         }
 
         // If quitting and all children idle, break out.
@@ -617,6 +677,10 @@ int pool_loop(const std::string& format, const std::string& license_path) {
                 return EXIT_OOM;  // OOM is fatal for the process
             } catch (const std::exception& e) {
                 respond_error(EXIT_RENDER_FAILURE, std::string("load: ") + e.what());
+            } catch (...) {
+                // Aspose::Cells::CellsException does not derive from std::exception;
+                // without this it unwinds to main and the worker exits mid-protocol.
+                respond_error(EXIT_RENDER_FAILURE, "load: non-standard exception");
             }
             continue;
         }
@@ -644,6 +708,8 @@ int pool_loop(const std::string& format, const std::string& license_path) {
                 return EXIT_OOM;  // OOM is fatal
             } catch (const std::exception& e) {
                 respond_error(EXIT_RENDER_FAILURE, std::string("render: ") + e.what());
+            } catch (...) {
+                respond_error(EXIT_RENDER_FAILURE, "render: non-standard exception");
             }
             continue;
         }
