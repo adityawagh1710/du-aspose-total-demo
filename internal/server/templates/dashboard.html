@@ -489,6 +489,14 @@ function fmtBytes(b) {
   if (b < 1048576) return `${(b/1024).toFixed(0)} KB`;
   return `${(b/1048576).toFixed(1)} MB`;
 }
+// esc HTML-escapes an API-supplied value before it goes into innerHTML.
+// Filenames, error codes and S3 URIs are caller-controlled (an upload named
+// `<img onerror=…>.docx` would otherwise run script for every viewer).
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
 function fmtName(entry) {
   if (entry.input_filename) return entry.input_filename;
   if (entry.output_s3_uri) {
@@ -560,7 +568,7 @@ function renderQueue(jobs) {
       card.innerHTML = `
         <div class="row1">
           <div class="badge">RID</div>
-          <div class="rid">${id}</div>
+          <div class="rid">${esc(id)}</div>
         </div>
         <div class="stage"><span class="pin"></span><span class="stage-text"></span></div>
         <div class="progress"><div class="fill" style="width: 0%"></div></div>
@@ -628,19 +636,19 @@ function renderRecent(data) {
     const subParts = [];
     if (isCross) {
       const via = viaServiceFromS3Uri(entry.output_s3_uri);
-      if (via) subParts.push(`<span class="via-tag">via ${via}</span>`);
-      if (entry.output_s3_uri) subParts.push(`<span>· ${entry.output_s3_uri.replace(/^s3:\/\//, 's3://')}</span>`);
+      if (via) subParts.push(`<span class="via-tag">via ${esc(via)}</span>`);
+      if (entry.output_s3_uri) subParts.push(`<span>· ${esc(entry.output_s3_uri)}</span>`);
     } else {
       const bits = ['via UI'];
-      if (entry.page_count) bits.push(`${entry.page_count} pages`);
+      if (entry.page_count) bits.push(`${esc(entry.page_count)} pages`);
       subParts.push(`<span>${bits.join(' · ')}</span>`);
     }
     const statusCls = entry.status === 'success' ? 'ok' : 'fail';
     const statusLabel = entry.status === 'success' ? 'ok' : 'failed';
     row.innerHTML = `
-      <div class="icon ${fmtClass(entry.format)}">${(entry.format || '?').toUpperCase()}</div>
+      <div class="icon ${fmtClass(entry.format)}">${esc((entry.format || '?').toUpperCase())}</div>
       <div class="name-cell">
-        <div class="name">${fmtName(entry)}</div>
+        <div class="name">${esc(fmtName(entry))}</div>
         <div class="sub">${subParts.join(' ')}</div>
       </div>
       <div class="time">${fmtRel(entry.completion_ts)}</div>
@@ -649,7 +657,7 @@ function renderRecent(data) {
       <div><span class="status ${statusCls}"><span class="dot"></span> ${statusLabel}</span></div>
       <div class="actions">${
         entry.status === 'failed'
-          ? `<a class="btn" title="${(entry.error_code || '')}">${entry.error_code || 'failed'}</a>`
+          ? `<a class="btn" title="${esc(entry.error_code)}">${esc(entry.error_code || 'failed')}</a>`
           : (entry.output_s3_uri
               ? renderDownloadLink(entry.output_s3_uri)
               : '<a class="btn primary">Download</a>')
@@ -667,7 +675,7 @@ function renderDownloadLink(s3uri) {
   const m = s3uri.match(/s3:\/\/([^/]+)\/(.+)$/);
   if (!m) return '<a class="btn primary">Download</a>';
   const params = new URLSearchParams({ bucket: m[1], key: m[2] });
-  return `<a class="btn primary" href="${API}/v1/downloads/presign?${params}" target="_blank" rel="noopener">Presign</a>`;
+  return `<a class="btn primary" href="${esc(API)}/v1/downloads/presign?${params}" target="_blank" rel="noopener">Presign</a>`;
 }
 
 /* ---- Wire up controls ---- */

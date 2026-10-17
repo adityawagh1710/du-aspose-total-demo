@@ -71,6 +71,13 @@ async function proxy(request: NextRequest, path: string[]): Promise<Response> {
   upstream.headers.forEach((value, key) => {
     if (!STRIP_RESPONSE.has(key.toLowerCase())) responseHeaders.set(key, value);
   });
+  // The API's HTML pages (e.g. /v1/dashboard) are meant to be loaded from the
+  // API origin. Served through this proxy they would run on the UI's origin
+  // without the middleware CSP (the matcher skips /api), so sandbox them into
+  // an opaque origin.
+  if ((upstream.headers.get('content-type') ?? '').includes('text/html')) {
+    responseHeaders.set('content-security-policy', 'sandbox allow-scripts');
+  }
 
   // Stream the upstream body back unbuffered (PDF downloads of any size).
   return new Response(upstream.body, {
