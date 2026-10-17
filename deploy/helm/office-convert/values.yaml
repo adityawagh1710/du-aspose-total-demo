@@ -224,9 +224,21 @@ ui:
     limits:
       cpu: "500m"
       memory: "4Gi"
-  # Dockerfile.ui doesn't set a USER, so the container runs as root. The
-  # shared podSecurityContext (runAsNonRoot: true) would block this pod from
-  # starting, so the UI gets its own empty securityContexts.
-  # TODO: harden Dockerfile.ui to run as non-root and remove these overrides.
-  podSecurityContext: {}
-  containerSecurityContext: {}
+  # ui/Dockerfile runs as the image's `node` user (uid/gid 1000), so the pod
+  # can be fully locked down. The root filesystem is read-only; Next.js's
+  # only writable paths (.next/cache, /tmp) are emptyDir mounts.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault

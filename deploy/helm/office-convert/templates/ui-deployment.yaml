@@ -65,6 +65,17 @@ spec:
             timeoutSeconds: 5
           resources:
             {{- toYaml .Values.ui.resources | nindent 12 }}
+          # Writable paths under the read-only root filesystem.
+          volumeMounts:
+            - name: next-cache
+              mountPath: /app/.next/cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: next-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
