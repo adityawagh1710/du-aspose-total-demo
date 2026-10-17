@@ -258,7 +258,7 @@ cmd_start() {
 
     hdr "Health probes"
     probe_endpoint "http://localhost:$api_port/health"           "API"
-    probe_endpoint "http://localhost:$ui_port/_stcore/health"    "UI"
+    probe_endpoint "http://localhost:$ui_port/"    "UI"
 
     hdr "Open in browser"
     printf "  ${G}API  →${X}  http://localhost:%s/docs        (Swagger)\n" "$api_port"
@@ -317,7 +317,7 @@ cmd_status() {
     fi
     hdr "Port-forwards"
     status_one "$API_SVC" "$API_PID_FILE" "$API_PORT_FILE" "/health"
-    status_one "$UI_SVC"  "$UI_PID_FILE"  "$UI_PORT_FILE"  "/_stcore/health"
+    status_one "$UI_SVC"  "$UI_PID_FILE"  "$UI_PORT_FILE"  "/"
 }
 
 cmd_restart() {
