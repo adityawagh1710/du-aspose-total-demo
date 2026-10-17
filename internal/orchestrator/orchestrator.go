@@ -120,6 +120,23 @@ func ConvertJob(
 
 	usePool := worker.PoolModeAvailable() && len(plan.Chunks) >= s.PoolMinChunks
 
+	// For DOCX/PPTX the lite probe reads the page count from docProps/app.xml,
+	// which can be stale. Pool mode re-plans from the loaded document, but
+	// one-shot renders pass explicit page ranges, so an undercount would drop
+	// pages silently. Get the exact count first.
+	if !usePool && (format == types.FormatDOCX || format == types.FormatPPTX) {
+		exact, perr := probe.ProbeWorker(ctx, s, inputPath, format, requestID)
+		if perr != nil {
+			return nil, perr
+		}
+		if exact.PageCount != plan.TotalPages {
+			oclog.EmitEvent("info", "replan_from_exact_probe", map[string]any{"estimated_pages": plan.TotalPages, "actual_pages": exact.PageCount})
+			exact.Format, exact.SizeBytes = pr.Format, pr.SizeBytes
+			plan = planner.PlanChunks(exact, effMaxPages, s.MaxMBPerChunk)
+			progress.Update(requestID, obs.ProgressUpdate{TotalChunks: intp(len(plan.Chunks))})
+		}
+	}
+
 	var rendered []chunkPath
 	if usePool {
 		rendered, plan, err = dispatchPool(ctx, requestID, inputPath, format, deps, scratchDir, plan, effMaxPages, pr, sourceSHA, cacheActive, counters)
@@ -216,30 +233,14 @@ func dispatchPool(
 		progress.Update(requestID, obs.ProgressUpdate{TotalChunks: intp(len(plan.Chunks))})
 	}
 
+	// Same OOM-subdivision retry as one-shot mode: the C++ pool reports
+	// bad_alloc as an OOM error for the chunk and stays alive, so the halves
+	// are rendered by the same pool.
+	renderOne := func(ctx context.Context, chunk types.Chunk) (string, error) {
+		return pool.RenderChunk(ctx, chunk, scratchDir)
+	}
 	render := func(ctx context.Context, chunk types.Chunk) (string, error) {
-		if cacheActive {
-			key := planner.ChunkSHA256(chunk, sourceSHA, format)
-			if cached := deps.Cache.GetChunk(key); cached != "" {
-				counters.addCacheHit()
-				progress.Update(requestID, obs.ProgressUpdate{IncrementChunks: 1})
-				return cached, nil
-			}
-			path, err := pool.RenderChunk(ctx, chunk, scratchDir)
-			if err != nil {
-				return "", err
-			}
-			counters.addRendered()
-			_ = deps.Cache.PutChunk(key, path)
-			progress.Update(requestID, obs.ProgressUpdate{IncrementChunks: 1})
-			return path, nil
-		}
-		path, err := pool.RenderChunk(ctx, chunk, scratchDir)
-		if err != nil {
-			return "", err
-		}
-		counters.addRendered()
-		progress.Update(requestID, obs.ProgressUpdate{IncrementChunks: 1})
-		return path, nil
+		return renderWithRetry(ctx, chunk, renderOne, format, deps, scratchDir, requestID, sourceSHA, cacheActive, counters, 0)
 	}
 
 	rendered, err := renderAll(ctx, plan.Chunks, s.Parallel, render)
@@ -256,23 +257,28 @@ func dispatchOneShot(
 	oclog.EmitEvent("info", "dispatch_mode", map[string]any{"mode": "one_shot", "workers": s.Parallel})
 	deps.Stores.Progress.Update(requestID, obs.ProgressUpdate{LoadProgress: f64p(1.0), Phase: strp("rendering")})
 
+	renderOne := func(ctx context.Context, chunk types.Chunk) (string, error) {
+		return worker.RenderChunkOneShot(ctx, s, chunk, inputPath, format, scratchDir, requestID)
+	}
 	render := func(ctx context.Context, chunk types.Chunk) (string, error) {
-		return renderWithRetry(ctx, chunk, inputPath, format, deps, scratchDir, requestID, sourceSHA, cacheActive, counters, 0)
+		return renderWithRetry(ctx, chunk, renderOne, format, deps, scratchDir, requestID, sourceSHA, cacheActive, counters, 0)
 	}
 	return renderAll(ctx, plan.Chunks, s.Parallel, render)
 }
 
-// renderWithRetry renders a chunk; on OOM it subdivides and recurses, then
-// concatenates the sub-PDFs into one. Mirrors orchestrator._render_with_retry.
+// renderWithRetry renders a chunk with renderOne; on OOM it subdivides and
+// recurses, then concatenates the sub-PDFs into one. Used by both dispatch
+// modes. Mirrors orchestrator._render_with_retry.
 func renderWithRetry(
-	ctx context.Context, chunk types.Chunk, inputPath string, format types.FormatName, deps Deps,
+	ctx context.Context, chunk types.Chunk, renderOne func(context.Context, types.Chunk) (string, error),
+	format types.FormatName, deps Deps,
 	scratchDir, requestID, sourceSHA string, cacheActive bool, counters *counters, depth int,
 ) (string, error) {
-	s := deps.Settings
 	if cacheActive {
 		key := planner.ChunkSHA256(chunk, sourceSHA, format)
 		if cached := deps.Cache.GetChunk(key); cached != "" {
 			counters.addCacheHit()
+			deps.Stores.Progress.Update(requestID, obs.ProgressUpdate{IncrementChunks: 1})
 			oclog.EmitEvent("info", "cache_hit", map[string]any{"layer": "chunk", "chunk_index": chunk.Index})
 			return cached, nil
 		}
@@ -283,7 +289,7 @@ func renderWithRetry(
 		"page_count": chunk.Pages(), "depth": depth, "worker": format,
 	})
 	chunkStarted := time.Now()
-	path, err := worker.RenderChunkOneShot(ctx, s, chunk, inputPath, format, scratchDir, requestID)
+	path, err := renderOne(ctx, chunk)
 	if err != nil {
 		if oe, ok := err.(*oerrors.Error); ok && oe.OOM {
 			counters.addSubdivision()
@@ -296,7 +302,7 @@ func renderWithRetry(
 				"sub_count": len(subs), "depth": depth,
 			})
 			subPaths, serr := renderAll(ctx, subs, len(subs), func(ctx context.Context, sc types.Chunk) (string, error) {
-				return renderWithRetry(ctx, sc, inputPath, format, deps, scratchDir, requestID, sourceSHA, cacheActive, counters, depth+1)
+				return renderWithRetry(ctx, sc, renderOne, format, deps, scratchDir, requestID, sourceSHA, cacheActive, counters, depth+1)
 			})
 			if serr != nil {
 				return "", serr
