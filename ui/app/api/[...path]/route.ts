@@ -21,12 +21,18 @@ const API_URL = process.env.API_URL ?? 'http://office-convert:8080';
 // is re-streamed (chunked). Host is dropped so the upstream sees its own host.
 // `expect` (100-continue, sent by curl/some clients for large uploads) is
 // rejected by undici fetch with "expect header not supported" — must be dropped.
+// Client-supplied forwarding headers are dropped too: the API rate-limits on
+// X-Forwarded-For, so passing a browser's forged value through would let it
+// pick its own bucket. Only the last hop's entry is re-forwarded (below).
 const STRIP_REQUEST = new Set([
   'host',
   'connection',
   'content-length',
   'transfer-encoding',
   'expect',
+  'x-forwarded-for',
+  'x-real-ip',
+  'forwarded',
 ]);
 const STRIP_RESPONSE = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection']);
 
@@ -37,6 +43,10 @@ async function proxy(request: NextRequest, path: string[]): Promise<Response> {
   request.headers.forEach((value, key) => {
     if (!STRIP_REQUEST.has(key.toLowerCase())) headers.set(key, value);
   });
+  // The rightmost X-Forwarded-For entry is the one appended by the proxy in
+  // front of the UI (e.g. the ALB); everything left of it is client-controlled.
+  const clientIp = (request.headers.get('x-forwarded-for') ?? '').split(',').pop()?.trim();
+  if (clientIp) headers.set('x-forwarded-for', clientIp);
 
   const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
 
