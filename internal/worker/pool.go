@@ -285,7 +285,7 @@ func (p *WorkerPool) RenderChunk(ctx context.Context, chunk types.Chunk, scratch
 		return "", ctx.Err()
 	}
 	defer func() { p.available <- w }()
-	outputPath := fmt.Sprintf("%s/chunk-%s.pdf", scratchDir, formatIndex(chunk.Index))
+	outputPath := fmt.Sprintf("%s/%s.pdf", scratchDir, ChunkFileStem(chunk))
 	return w.RenderChunk(chunk, outputPath, time.Duration(p.settings.ChunkTimeoutSeconds)*time.Second)
 }
 
@@ -546,7 +546,7 @@ func NewForkedWorkerPool(s *config.Settings, format types.FormatName, input, req
 
 // RenderChunk renders one chunk via the leader.
 func (p *ForkedWorkerPool) RenderChunk(ctx context.Context, chunk types.Chunk, scratchDir string) (string, error) {
-	outputPath := fmt.Sprintf("%s/chunk-%s.pdf", scratchDir, formatIndex(chunk.Index))
+	outputPath := fmt.Sprintf("%s/%s.pdf", scratchDir, ChunkFileStem(chunk))
 	return p.leader.RenderChunk(chunk, outputPath, time.Duration(p.settings.ChunkTimeoutSeconds)*time.Second)
 }
 

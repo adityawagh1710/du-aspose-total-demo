@@ -301,7 +301,7 @@ func renderWithRetry(
 			if serr != nil {
 				return "", serr
 			}
-			merged := fmt.Sprintf("%s/chunk-%s-merged.pdf", scratchDir, formatIndex(chunk.Index))
+			merged := fmt.Sprintf("%s/%s-merged.pdf", scratchDir, worker.ChunkFileStem(chunk))
 			paths := make([]string, len(subPaths))
 			for i, sp := range subPaths {
 				paths[i] = sp.path
@@ -449,15 +449,6 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func formatIndex(idx float64) string {
-	s := fmt.Sprintf("%g", idx)
-	for _, r := range s {
-		if r == '.' || r == 'e' || r == 'E' {
-			return s
-		}
-	}
-	return s + ".0"
-}
 
 func round3(d time.Duration) float64 { return round3time(d.Seconds()) }
 func round3time(sec float64) float64 { return float64(int64(sec*1000+0.5)) / 1000 }
