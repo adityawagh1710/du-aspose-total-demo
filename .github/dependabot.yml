@@ -16,12 +16,12 @@ updates:
       day: monday
       time: "07:00"
       timezone: Etc/UTC
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     labels:
       - dependencies
       - javascript
     commit-message:
-      prefix: "chore(deps)"
+      prefix: "chore"
       include: scope
     groups:
       # Next.js + React runtime stack. Bumping these together avoids the
@@ -57,10 +57,12 @@ updates:
           - "minor"
           - "patch"
 
-  # Base images in the Dockerfiles. Picks up golang:1.26-bookworm,
-  # node:22-alpine, gotenberg/gotenberg, localstack/localstack, etc.
+  # Base images in the Dockerfiles (debian:bookworm, golang:1.26-bookworm,
+  # node:22-alpine).
   - package-ecosystem: docker
-    directory: /
+    directories:
+      - /
+      - /ui
     schedule:
       interval: weekly
       day: monday
@@ -71,7 +73,7 @@ updates:
       - dependencies
       - docker
     commit-message:
-      prefix: "chore(deps)"
+      prefix: "chore"
       include: scope
     groups:
       # All base-image bumps in one PR.
@@ -84,6 +86,60 @@ updates:
     # Don't auto-bump majors — major base-image bumps (Go toolchain,
     # Node runtime) need manual review + local build verification.
     ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Go modules for the orchestrator (go.mod at repo root).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: "chore"
+      include: scope
+    groups:
+      # Minor/patch Go deps in one PR; majors (new import path) stay
+      # individual.
+      go-deps:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Service images in compose.yaml (gotenberg/gotenberg, localstack/localstack).
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "chore"
+      include: scope
+    groups:
+      compose-images:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Locally built images, not in any registry.
+      - dependency-name: "office-convert"
+      - dependency-name: "office-convert-ui"
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
 
@@ -101,7 +157,7 @@ updates:
       - dependencies
       - github-actions
     commit-message:
-      prefix: "chore(deps)"
+      prefix: "chore"
       include: scope
     groups:
       # Small surface; group all actions in one PR. Includes major
