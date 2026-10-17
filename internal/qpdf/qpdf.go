@@ -35,7 +35,8 @@ func ConcatStreaming(ctx context.Context, chunkPaths []string, dst io.Writer, ca
 
 	argv := append([]string{"--empty", "--pages"}, chunkPaths...)
 	argv = append(argv, "--", "-")
-	cmd := exec.Command(Binary, argv...)
+	// CommandContext: a cancelled request (client gone) kills qpdf.
+	cmd := exec.CommandContext(ctx, Binary, argv...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return oerrors.NewMerge(-1, "stdout pipe: "+err.Error())
@@ -71,6 +72,11 @@ func ConcatStreaming(ctx context.Context, chunkPaths []string, dst io.Writer, ca
 
 	buf := make([]byte, readBlockSize)
 	_, copyErr := io.CopyBuffer(w, stdout, buf)
+	if copyErr != nil {
+		// Nothing reads qpdf's stdout any more, so it would block on a full
+		// pipe forever (and stderr never hit EOF). Kill it before waiting.
+		_ = cmd.Process.Kill()
+	}
 	if tee != nil {
 		_ = tee.Sync()
 		_ = tee.Close()

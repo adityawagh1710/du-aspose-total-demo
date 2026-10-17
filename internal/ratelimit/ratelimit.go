@@ -115,16 +115,15 @@ func (l *Limiter) Check(clientID string) Decision {
 	}
 }
 
-// ClientIDFor resolves a client identifier. With trustXFF, the first IP in
-// X-Forwarded-For wins (ALB appends the original client IP first), else falls
-// back to the remote address. Mirrors client_id_for.
+// ClientIDFor resolves a client identifier. With trustXFF, the LAST entry of
+// X-Forwarded-For wins: the ALB appends the peer it saw to whatever the client
+// sent, so earlier entries are client-controlled and keying on them let anyone
+// mint a fresh bucket per request. Otherwise falls back to the remote address.
 func ClientIDFor(r *http.Request, trustXFF bool) string {
 	if trustXFF {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first := strings.TrimSpace(strings.SplitN(xff, ",", 2)[0])
-			if first != "" {
-				return first
-			}
+		xff := strings.Join(r.Header.Values("X-Forwarded-For"), ",")
+		if last := strings.TrimSpace(xff[strings.LastIndexByte(xff, ',')+1:]); last != "" {
+			return last
 		}
 	}
 	host := r.RemoteAddr

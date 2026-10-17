@@ -21,8 +21,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -190,7 +188,7 @@ func runWorkerBin(
 // RenderChunkOneShot spawns a worker subprocess to render one chunk (non-pool
 // path). Mirrors aspose_worker.render_chunk. Returns the chunk PDF path.
 func RenderChunkOneShot(ctx context.Context, s *config.Settings, chunk types.Chunk, inputPath string, format types.FormatName, scratchDir, requestID string) (string, error) {
-	outputPath := fmt.Sprintf("%s/chunk-%s.pdf", scratchDir, formatIndex(chunk.Index))
+	outputPath := fmt.Sprintf("%s/%s.pdf", scratchDir, ChunkFileStem(chunk))
 	pr := [2]int{chunk.PageStart, chunk.PageEnd}
 	_, _, err := RunWorker(ctx, s, "render", inputPath, format, outputPath, &pr, requestID, &chunk)
 	if err != nil {
@@ -328,15 +326,11 @@ func chunkIndex(c *types.Chunk) any {
 	return c.Index
 }
 
-// formatIndex renders a chunk index the same way Python's f"chunk-{index}.pdf"
-// does. The index is a float, so Python's str(float) yields "0.0", "1.0",
-// "3.5" — integer-valued floats keep a trailing ".0".
-func formatIndex(idx float64) string {
-	s := strconv.FormatFloat(idx, 'g', -1, 64)
-	if !strings.ContainsAny(s, ".eE") {
-		s += ".0"
-	}
-	return s
+// ChunkFileStem names a chunk's scratch files by its page range. Page ranges
+// are unique within a request, including across OOM subdivision levels, unlike
+// the float Index (subdividing 3.5 yields 3.5 and 4.0, colliding with chunk 4).
+func ChunkFileStem(c types.Chunk) string {
+	return fmt.Sprintf("chunk-p%d-%d", c.PageStart, c.PageEnd)
 }
 
 func tailStr(b []byte, n int) string {

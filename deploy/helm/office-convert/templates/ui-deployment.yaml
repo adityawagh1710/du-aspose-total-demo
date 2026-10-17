@@ -25,46 +25,31 @@ spec:
             {{- toYaml .Values.ui.containerSecurityContext | nindent 12 }}
           ports:
             - name: http
-              containerPort: 8501
+              # Next.js standalone server (ui/Dockerfile sets PORT=3000).
+              containerPort: 3000
               protocol: TCP
           env:
-            # UI → API path: in-cluster service DNS. Same target regardless of
-            # how the UI itself is reached (port-forward or NLB), so a user
-            # browsing localhost:8501 hits exactly the same API as a user
-            # browsing the (eventual) UI NLB.
+            # UI → API path for the server-side /api proxy: in-cluster
+            # service DNS, read at runtime by app/api/[...path]/route.ts.
             - name: API_URL
               value: "http://{{ include "office-convert.fullname" . }}:{{ .Values.service.port }}"
-            # Browser-facing API URL — used for iframes the operator's
-            # browser loads directly (e.g. /v1/dashboard embedded panel).
-            # The browser can't resolve the in-cluster service DNS in
-            # API_URL above, so PUBLIC_API_URL must be the external ALB
-            # hostname of the API Ingress. Configure in values.yaml as
-            # `ui.publicApiUrl`. Defaults to API_URL (single-origin local
-            # dev); set explicitly for any deployment where API and UI
-            # live on different hostnames.
-            - name: PUBLIC_API_URL
-              value: {{ .Values.ui.publicApiUrl | default (printf "http://%s:%v" (include "office-convert.fullname" .) .Values.service.port) | quote }}
-            - name: STREAMLIT_SERVER_HEADLESS
-              value: "true"
-            # XSRF off: port-forward changes the origin and Streamlit's default
-            # XSRF check rejects file uploads otherwise. UI is internal-only
-            # (ClusterIP) and has no auth in v1, so this adds no real security.
-            - name: STREAMLIT_SERVER_ENABLE_CORS
-              value: {{ .Values.ui.streamlit.enableCORS | quote }}
-            - name: STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION
-              value: {{ .Values.ui.streamlit.enableXsrfProtection | quote }}
-            # Streamlit's default upload cap is 200 MB; raised to match the
-            # API's max_input_bytes so the UI doesn't reject before the
-            # API ceiling kicks in.
-            - name: STREAMLIT_SERVER_MAX_UPLOAD_SIZE
-              value: {{ .Values.ui.streamlit.maxUploadSizeMb | quote }}
-            - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
-              value: "false"
+            # Browser-facing URL of the API's /v1/dashboard, embedded as an
+            # iframe and allowed in the CSP frame-src. The browser can't
+            # resolve the in-cluster DNS above, so set `ui.publicApiUrl` to
+            # the API Ingress hostname. Read at request time (page.tsx is
+            # force-dynamic), so no image rebuild is needed.
+            - name: NEXT_PUBLIC_DASHBOARD_URL
+              value: {{ printf "%s/v1/dashboard" (.Values.ui.publicApiUrl | default (printf "http://%s:%v" (include "office-convert.fullname" .) .Values.service.port)) | quote }}
+            - name: NEXT_PUBLIC_S3_ENABLED
+              value: {{ .Values.s3.enabled | quote }}
+            {{- with .Values.s3.defaultOutputBucket }}
+            - name: NEXT_PUBLIC_S3_OUTPUT_BUCKET
+              value: {{ . | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
-              # Streamlit's built-in health endpoint. Returns "ok" once the
-              # server is accepting requests.
-              path: /_stcore/health
+              # The dashboard root; the image's own HEALTHCHECK uses it too.
+              path: /
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5
@@ -72,7 +57,7 @@ spec:
             timeoutSeconds: 3
           livenessProbe:
             httpGet:
-              path: /_stcore/health
+              path: /
               port: http
             initialDelaySeconds: 15
             periodSeconds: 30
@@ -80,6 +65,17 @@ spec:
             timeoutSeconds: 5
           resources:
             {{- toYaml .Values.ui.resources | nindent 12 }}
+          # Writable paths under the read-only root filesystem.
+          volumeMounts:
+            - name: next-cache
+              mountPath: /app/.next/cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: next-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -104,6 +104,13 @@ func poolLoop() {
 			resp["status"] = "ok"
 			resp["page_count"] = pageCount()
 		case "render":
+			// FAKE_CRASH_PAGE=N: die without replying when asked to render a
+			// chunk starting at page N (a worker crash mid-render).
+			if v := os.Getenv("FAKE_CRASH_PAGE"); v != "" {
+				if ps, ok := cmd["page_start"].(float64); ok && fmt.Sprint(int(ps)) == v {
+					os.Exit(3)
+				}
+			}
 			if exitCode != 0 {
 				resp["status"] = "error"
 				resp["code"] = exitCode

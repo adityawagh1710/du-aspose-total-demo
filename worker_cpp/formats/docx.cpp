@@ -27,8 +27,12 @@
 #include <system/object.h>
 #include <system/string.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -91,11 +95,10 @@ void render_docx_from(System::SharedPtr<Aspose::Words::Document> doc,
     doc->Save(System::String(output.c_str()), opts);
 }
 
+System::SharedPtr<Aspose::Words::Loading::LoadOptions> new_load_options(const std::string& input);
+
 void render_docx(const RenderArgs& args) {
-    auto load_opts = System::MakeObject<Aspose::Words::Loading::LoadOptions>();
-    if (input_ends_with_odt(args.input)) {
-        load_opts->set_LoadFormat(Aspose::Words::LoadFormat::Odt);
-    }
+    auto load_opts = new_load_options(args.input);
     auto doc = System::MakeObject<Aspose::Words::Document>(
         System::String(args.input.c_str()), load_opts);
     render_docx_from(doc, args.page_start, args.page_end, args.output);
@@ -108,28 +111,19 @@ void render_docx(const RenderArgs& args) {
 // public hosts. Loopback, RFC1918, link-local/metadata, IPv6-private, and
 // single-label (in-cluster) hostnames are denied. Mirrors the orchestrator's
 // internal/netpolicy and Gotenberg's --chromium-deny-list — keep in sync.
-bool ipv4_octets(const std::string& host, int out[4]) {
-    int vals[4] = {0, 0, 0, 0};
-    int idx = 0;
-    size_t start = 0;
-    for (size_t i = 0; i <= host.size(); ++i) {
-        if (i == host.size() || host[i] == '.') {
-            if (i == start || idx > 3) return false;
-            for (size_t j = start; j < i; ++j) {
-                if (!std::isdigit(static_cast<unsigned char>(host[j]))) return false;
-            }
-            try {
-                vals[idx] = std::stoi(host.substr(start, i - start));
-            } catch (...) {
-                return false;
-            }
-            if (vals[idx] < 0 || vals[idx] > 255) return false;
-            ++idx;
-            start = i + 1;
-        }
+// 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 (host byte order).
+bool private_ipv4(uint32_t addr) {
+    const uint32_t a = addr >> 24, b = (addr >> 16) & 0xff;
+    return a == 0 || a == 10 || a == 127 || (a == 169 && b == 254) ||
+           (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
+}
+
+bool numeric_label(const std::string& label) {
+    if (label.rfind("0x", 0) == 0) return true;
+    if (label.empty()) return false;
+    for (char c : label) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) return false;
     }
-    if (idx != 4) return false;
-    for (int i = 0; i < 4; ++i) out[i] = vals[i];
     return true;
 }
 
@@ -152,22 +146,36 @@ bool deny_resource_url(const std::string& raw, std::string& reason) {
         return true;
     }
 
-    // Host = authority minus userinfo/port/path.
+    // Authority ends at the first '/', '?', '#' (or '\', which browsers treat
+    // as '/'); only then strip userinfo, up to the LAST '@'. Searching for '@'
+    // first let "http://169.254.169.254/x/@a.com" pass as host "a.com".
     std::string host = lower.substr(scheme_end + 3);
-    if (auto at = host.find('@'); at != std::string::npos) host = host.substr(at + 1);
-    if (auto slash = host.find_first_of("/?#"); slash != std::string::npos) host = host.substr(0, slash);
+    if (auto end = host.find_first_of("/?#\\"); end != std::string::npos) host = host.substr(0, end);
+    if (auto at = host.rfind('@'); at != std::string::npos) host = host.substr(at + 1);
     if (!host.empty() && host.front() == '[') {  // IPv6 literal
         const auto close = host.find(']');
-        const std::string v6 = close == std::string::npos ? host.substr(1) : host.substr(1, close - 1);
-        if (v6 == "::1" || v6.rfind("fd", 0) == 0 || v6.rfind("fc", 0) == 0 ||
-            v6.rfind("fe8", 0) == 0 || v6.rfind("fe9", 0) == 0 ||
-            v6.rfind("fea", 0) == 0 || v6.rfind("feb", 0) == 0) {
+        std::string v6 = close == std::string::npos ? host.substr(1) : host.substr(1, close - 1);
+        if (auto zone = v6.find('%'); zone != std::string::npos) v6 = v6.substr(0, zone);
+        // inet_pton accepts every textual form (::1, 0:0:0:0:0:0:0:1, ::ffff:7f00:1).
+        in6_addr a6{};
+        if (inet_pton(AF_INET6, v6.c_str(), &a6) != 1) {
+            reason = "malformed IPv6 literal";
+            return true;
+        }
+        const uint8_t* b = a6.s6_addr;
+        bool zero10 = true;
+        for (int i = 0; i < 10; ++i) zero10 = zero10 && b[i] == 0;
+        // ::/96 (::, ::1, IPv4-compatible) and ::ffff:0:0/96 (IPv4-mapped).
+        const bool reserved = zero10 && ((b[10] == 0 && b[11] == 0) || (b[10] == 0xff && b[11] == 0xff));
+        if (reserved || (b[0] & 0xfe) == 0xfc || (b[0] == 0xfe && (b[1] & 0xc0) == 0x80)) {
             reason = "private IPv6 " + v6;
             return true;
         }
         return false;
     }
     if (auto colon = host.find(':'); colon != std::string::npos) host = host.substr(0, colon);
+    // "localhost." resolves exactly like "localhost".
+    while (!host.empty() && host.back() == '.') host.pop_back();
 
     if (host.empty()) {
         reason = "empty host";
@@ -177,12 +185,11 @@ bool deny_resource_url(const std::string& raw, std::string& reason) {
         reason = "loopback host";
         return true;
     }
-    int o[4];
-    if (ipv4_octets(host, o)) {
-        const bool priv = o[0] == 127 || (o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0) ||
-                          o[0] == 10 || (o[0] == 172 && o[1] >= 16 && o[1] <= 31) ||
-                          (o[0] == 192 && o[1] == 168) || (o[0] == 169 && o[1] == 254);
-        if (priv) {
+    // inet_aton accepts every legacy IPv4 spelling a resolver would honour
+    // (127.1, 0x7f.0.0.1, 0177.0.0.1, 2130706433), not only dotted-quad.
+    in_addr a4{};
+    if (inet_aton(host.c_str(), &a4) != 0) {
+        if (private_ipv4(ntohl(a4.s_addr))) {
             reason = "private IPv4 " + host;
             return true;
         }
@@ -190,6 +197,10 @@ bool deny_resource_url(const std::string& raw, std::string& reason) {
     }
     if (host.find('.') == std::string::npos) {
         reason = "single-label host " + host;
+        return true;
+    }
+    if (numeric_label(host.substr(host.rfind('.') + 1))) {
+        reason = "non-canonical IP literal " + host;
         return true;
     }
     return false;
@@ -212,6 +223,18 @@ public:
     }
 };
 
+// Every Words load gets the BR-4 deny callback, not only format=html: DOCX
+// external linked images and the email pipeline's attacker-controlled MHTML
+// (rendered as docx) fetch remote resources too.
+System::SharedPtr<Aspose::Words::Loading::LoadOptions> new_load_options(const std::string& input) {
+    auto opts = System::MakeObject<Aspose::Words::Loading::LoadOptions>();
+    opts->set_ResourceLoadingCallback(System::MakeObject<DenyPolicyResourceCallback>());
+    if (input_ends_with_odt(input)) {
+        opts->set_LoadFormat(Aspose::Words::LoadFormat::Odt);
+    }
+    return opts;
+}
+
 // BR-7 fair-comparison geometry: US Letter, 0.5in margins, on every section
 // (both engines render to identical page geometry). 1in == 72pt.
 void force_letter_geometry(System::SharedPtr<Aspose::Words::Document> doc) {
@@ -230,10 +253,8 @@ void force_letter_geometry(System::SharedPtr<Aspose::Words::Document> doc) {
 // Full-document HTML render. --page-range is deliberately ignored: HTML has no
 // pre-known page count and this path is single-shot (no chunk planner).
 void render_html(const RenderArgs& args) {
-    auto load_opts = System::MakeObject<Aspose::Words::Loading::LoadOptions>();
+    auto load_opts = new_load_options(args.input);
     load_opts->set_LoadFormat(Aspose::Words::LoadFormat::Html);
-    load_opts->set_ResourceLoadingCallback(
-        System::MakeObject<DenyPolicyResourceCallback>());
     auto doc = System::MakeObject<Aspose::Words::Document>(
         System::String(args.input.c_str()), load_opts);
     force_letter_geometry(doc);
@@ -245,10 +266,7 @@ void render_html(const RenderArgs& args) {
 }
 
 int probe_docx_page_count(const std::string& input) {
-    auto load_opts = System::MakeObject<Aspose::Words::Loading::LoadOptions>();
-    if (input_ends_with_odt(input)) {
-        load_opts->set_LoadFormat(Aspose::Words::LoadFormat::Odt);
-    }
+    auto load_opts = new_load_options(input);
     auto doc = System::MakeObject<Aspose::Words::Document>(
         System::String(input.c_str()), load_opts);
     return doc->get_PageCount();
@@ -330,12 +348,9 @@ private:
 
 int pool_load(const std::string& input_path) {
     auto t0 = std::chrono::steady_clock::now();
-    auto load_opts = System::MakeObject<Aspose::Words::Loading::LoadOptions>();
+    auto load_opts = new_load_options(input_path);
     auto cb = System::MakeObject<LoadProgressCallback>();
     load_opts->set_ProgressCallback(cb);
-    if (input_ends_with_odt(input_path)) {
-        load_opts->set_LoadFormat(Aspose::Words::LoadFormat::Odt);
-    }
     g_document = System::MakeObject<Aspose::Words::Document>(
         System::String(input_path.c_str()), load_opts);
     auto t1 = std::chrono::steady_clock::now();

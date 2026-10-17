@@ -3,11 +3,13 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +98,83 @@ func TestHTMLGotenbergSuccessAndTelemetry(t *testing.T) {
 	require.Contains(t, stats, "per_engine_html")
 	perEngine := stats["per_engine_html"].(map[string]any)
 	assert.Contains(t, perEngine, "gotenberg")
+}
+
+// A hostile X-Request-ID must not steer the per-request scratch dir: with
+// ScratchDir=<dir>/scratch, "X-Request-ID: .." used to make cleanup run
+// RemoveAll(<dir>), deleting everything beside the scratch root.
+func TestHostileRequestIDCannotEscapeScratch(t *testing.T) {
+	srv := buildTestServer(t)
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "%PDF-1.7 fake-chromium-pdf")
+	}))
+	defer fake.Close()
+	srv.settings.GotenbergURL = fake.URL
+	parent := filepath.Dir(srv.settings.LicensePath)
+	srv.settings.ScratchDir = filepath.Join(parent, "scratch")
+
+	for _, rid := range []string{"..", ".", "../..", "a/../..", strings.Repeat("x", 65)} {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		part, err := mw.CreateFormFile("file", "page.html")
+		require.NoError(t, err)
+		_, _ = io.WriteString(part, sampleHTML)
+		require.NoError(t, mw.Close())
+		r := httptest.NewRequest("POST", "/v1/convert/html/gotenberg", &buf)
+		r.Header.Set("Content-Type", mw.FormDataContentType())
+		r.Header.Set("X-Request-ID", rid)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+
+		assert.Equal(t, 200, w.Code, "rid %q", rid)
+		assert.NotEqual(t, rid, w.Header().Get("X-Request-ID"), "invalid rid %q must be replaced", rid)
+		_, err = os.Stat(srv.settings.LicensePath)
+		require.NoError(t, err, "rid %q deleted files outside the scratch dir", rid)
+	}
+}
+
+// An upload far past the size cap is rejected as input_too_large without the
+// whole body being spooled first (MaxBytesReader stops the multipart parse).
+func TestOversizedUploadRejectedBeforeFullParse(t *testing.T) {
+	srv := buildTestServer(t)
+	srv.settings.HTMLMaxBytes = 1024
+	big := "<!doctype html><html><body>" + strings.Repeat("x", 3<<20) + "</body></html>"
+	resp := postMultipart(t, srv, "/v1/convert/html/aspose", "page.html", big, nil)
+	require.Equal(t, 400, resp.StatusCode)
+	assert.Equal(t, "input_too_large", decodeDiag(t, resp)["failure_class"])
+}
+
+// A failure after the first PDF byte must abort the connection: ending the
+// chunked body cleanly handed clients a truncated PDF with status 200.
+func TestMidStreamFailureAbortsResponse(t *testing.T) {
+	srv := buildTestServer(t)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &streamWriter{w: w, headers: map[string]string{"Content-Type": "application/pdf"}}
+		if f, ok := w.(http.Flusher); ok {
+			sw.flusher = f
+		}
+		di := dispatchInfo{rid: "midstream", t0: time.Now(), format: "docx"}
+		srv.finishStream(sw, di, t.TempDir(), func(dst io.Writer) error {
+			_, _ = io.WriteString(dst, "%PDF-1.7 partial")
+			return errors.New("qpdf died mid-merge")
+		})
+	}))
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	_, err = io.ReadAll(resp.Body)
+	require.Error(t, err, "truncated stream must not read as a complete body")
+}
+
+func TestValidRequestID(t *testing.T) {
+	for _, ok := range []string{"rid-health", "abc_DEF-123", strings.Repeat("a", 64)} {
+		assert.True(t, validRequestID(ok), ok)
+	}
+	for _, bad := range []string{"", ".", "..", "a/b", `a\b`, "a b", "ü", strings.Repeat("a", 65)} {
+		assert.False(t, validRequestID(bad), bad)
+	}
 }
 
 // A conversion that completes in under 1ms must still count toward stats.

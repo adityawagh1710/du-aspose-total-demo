@@ -136,6 +136,28 @@ func TestWorkerPoolLegacyRenders(t *testing.T) {
 	}
 }
 
+// A legacy pool worker that dies mid-render must not go back into rotation:
+// it is replaced, so the next chunk renders instead of failing on a dead pipe.
+func TestWorkerPoolReplacesDeadWorker(t *testing.T) {
+	prefix := buildFakeWorker(t, types.FormatXLSX)
+	t.Setenv("FAKE_CRASH_PAGE", "1")
+	s := testSettings(prefix)
+	scratch := t.TempDir()
+
+	pool, err := NewWorkerPool(s, types.FormatXLSX, mkInput(t), "rid-dead", testStores(), 1)
+	require.NoError(t, err, "spawn")
+	defer pool.Close(context.Background())
+
+	_, err = pool.RenderChunk(context.Background(), types.Chunk{PageStart: 1, PageEnd: 2}, scratch)
+	require.Error(t, err, "crashing chunk must fail")
+
+	p, err := pool.RenderChunk(context.Background(), types.Chunk{Index: 1, PageStart: 3, PageEnd: 4}, scratch)
+	require.NoError(t, err, "next chunk must get a live (replacement) worker")
+	b, err := os.ReadFile(p)
+	require.NoError(t, err)
+	require.NotEmpty(t, b)
+}
+
 func TestLegacyPoolHeartbeatPoolIndexDistinct(t *testing.T) {
 	// The fake worker emits pool_index=0 in every heartbeat (each legacy worker
 	// is its own process). The legacy pool MUST override with each worker's

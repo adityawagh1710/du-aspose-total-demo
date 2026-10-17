@@ -78,7 +78,7 @@ automatically — so the bookmarkable hostnames in
 ```bash
 ./deploy/scripts/portforward.sh start
 # → API on http://localhost:18080  (FastAPI + Swagger at /docs)
-# → UI  on http://localhost:8501   (Streamlit dashboard)
+# → UI  on http://localhost:8501   (Next.js dashboard)
 
 ./deploy/scripts/portforward.sh status     # show PIDs + endpoint health
 ./deploy/scripts/portforward.sh restart
@@ -108,7 +108,7 @@ sessions outside the port-forward flow.
 `helm/office-convert/` ships:
 
 - **API Deployment** — FastAPI orchestrator (`uvicorn office_convert.server:app`), `replicaCount: 1`, `max_jobs: 1`, `parallel: 2`. Resources: `1–4 CPU`, `2–4 GiB memory`. **No swap on K8s** (vs. compose's 6 GiB cushion); big PPTX/XLSX inputs > ~250 MB will OOM the pod.
-- **UI Deployment** — Streamlit dashboard (`office_convert_ui/app.py`). Resources: `0.1–0.5 CPU`, `512Mi–1.5Gi memory` (bumped from 512Mi after OOMKills on 2026-05-18). Talks to the API via in-cluster DNS.
+- **UI Deployment** — Next.js dashboard (`ui/`, container port 3000, Service port 8501). Talks to the API via in-cluster DNS.
 - **Two LoadBalancer Services** — both internal NLBs. Currently coexist alongside the ALB Ingress (commit A "alongside NLBs"); local commit `33ba4c6` flips them to `ClusterIP` to drop the dormant NLBs.
 - **Two Ingresses sharing one ALB** (`templates/ingress.yaml`) — internet-facing, corp-CIDR allowlisted, wildcard ACM TLS terminated at the ALB. `group.name: office-convert` merges UI + API Ingresses onto the same ALB; subdomain routing by Host header. See [`aidlc-docs/operations/dev-deployment-topology.md`](../aidlc-docs/operations/dev-deployment-topology.md) §6/§11 for the as-built spec and live state.
 - **ConfigMap** — `OFFICE_CONVERT_*` env vars; consumed by Pydantic's `env_prefix` in `office_convert/config.py`.

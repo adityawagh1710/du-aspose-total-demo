@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/opus2/office-convert-orchestrator/internal/config"
@@ -52,6 +53,9 @@ type PooledWorker struct {
 
 	respCh chan string
 	loaded bool
+	// dead: the process exited, was killed on timeout, or desynced the
+	// protocol. A dead worker must not take more chunks.
+	dead atomic.Bool
 }
 
 func spawnPooledWorker(s *config.Settings, format types.FormatName, poolIndex int, requestID string, stores Stores, extraArgs ...string) (*PooledWorker, error) {
@@ -127,14 +131,20 @@ func (w *PooledWorker) await(timeout time.Duration, chunk *types.Chunk) (map[str
 	select {
 	case line, ok := <-w.respCh:
 		if !ok {
+			w.dead.Store(true)
 			return nil, oerrors.NewRender(chunk, ExitRenderFailure, "worker stdout EOF")
 		}
 		var result map[string]any
 		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			// The reply stream is out of step: a later line would be taken
+			// as the next chunk's reply. Retire the worker.
+			w.dead.Store(true)
+			_ = w.cmd.Process.Kill()
 			return nil, oerrors.NewRender(chunk, ExitRenderFailure, "invalid worker JSON: "+err.Error())
 		}
 		return result, nil
 	case <-time.After(timeout):
+		w.dead.Store(true)
 		_ = w.cmd.Process.Kill()
 		return nil, oerrors.NewRender(chunk, -1, "pool worker timeout")
 	}
@@ -204,6 +214,7 @@ type WorkerPool struct {
 	stores    Stores
 	poolSize  int
 
+	mu        sync.Mutex // guards workers (replace vs Close)
 	workers   []*PooledWorker
 	available chan *PooledWorker
 	pageCount int
@@ -284,9 +295,39 @@ func (p *WorkerPool) RenderChunk(ctx context.Context, chunk types.Chunk, scratch
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
-	defer func() { p.available <- w }()
-	outputPath := fmt.Sprintf("%s/chunk-%s.pdf", scratchDir, formatIndex(chunk.Index))
-	return w.RenderChunk(chunk, outputPath, time.Duration(p.settings.ChunkTimeoutSeconds)*time.Second)
+	outputPath := fmt.Sprintf("%s/%s.pdf", scratchDir, ChunkFileStem(chunk))
+	path, err := w.RenderChunk(chunk, outputPath, time.Duration(p.settings.ChunkTimeoutSeconds)*time.Second)
+	if w.dead.Load() {
+		w = p.replace(w)
+	}
+	p.available <- w
+	return path, err
+}
+
+// replace reaps a dead worker and swaps in a freshly loaded one. If the
+// respawn fails the dead worker stays in rotation: its chunks then fail fast
+// (stdin EPIPE / closed stdout) instead of blocking on an empty pool.
+func (p *WorkerPool) replace(dead *PooledWorker) *PooledWorker {
+	dead.kill()
+	nw, err := spawnPooledWorker(p.settings, p.format, dead.poolIndex, p.requestID, p.stores)
+	if err == nil {
+		if _, err = nw.LoadDocument(p.input); err != nil {
+			nw.kill()
+		}
+	}
+	if err != nil {
+		oclog.EmitEvent("warn", "pool_worker_respawn_failed", map[string]any{"pool_index": dead.poolIndex, "error": err.Error()})
+		return dead
+	}
+	oclog.EmitEvent("info", "pool_worker_respawned", map[string]any{"pool_index": dead.poolIndex, "pid": nw.pid})
+	p.mu.Lock()
+	for i, w := range p.workers {
+		if w == dead {
+			p.workers[i] = nw
+		}
+	}
+	p.mu.Unlock()
+	return nw
 }
 
 // ActualPageCount returns the page count reported by the first loaded worker.
@@ -294,6 +335,8 @@ func (p *WorkerPool) ActualPageCount() (int, bool) { return p.pageCount, p.haveP
 
 // Close gracefully shuts down all workers.
 func (p *WorkerPool) Close(ctx context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, w := range p.workers {
 		w.quit()
 	}
@@ -546,7 +589,7 @@ func NewForkedWorkerPool(s *config.Settings, format types.FormatName, input, req
 
 // RenderChunk renders one chunk via the leader.
 func (p *ForkedWorkerPool) RenderChunk(ctx context.Context, chunk types.Chunk, scratchDir string) (string, error) {
-	outputPath := fmt.Sprintf("%s/chunk-%s.pdf", scratchDir, formatIndex(chunk.Index))
+	outputPath := fmt.Sprintf("%s/%s.pdf", scratchDir, ChunkFileStem(chunk))
 	return p.leader.RenderChunk(chunk, outputPath, time.Duration(p.settings.ChunkTimeoutSeconds)*time.Second)
 }
 

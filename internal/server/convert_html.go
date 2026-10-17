@@ -42,8 +42,6 @@ func (srv *Server) convertHTML(w http.ResponseWriter, r *http.Request, engine st
 	s := srv.settings
 	di := dispatchInfo{rid: rid, t0: time.Now(), source: "ui", format: "html", engine: engine}
 
-	_ = r.ParseMultipartForm(16 << 20)
-
 	// Per-IP rate limit (shared budget with /v1/convert).
 	rateHeaders := map[string]string{}
 	if srv.rl != nil {
@@ -76,6 +74,13 @@ func (srv *Server) convertHTML(w http.ResponseWriter, r *http.Request, engine st
 	}
 	defer release()
 
+	// Parse the upload only after the rate limit and slot checks, capped at
+	// the HTML size limit.
+	if err := parseUpload(w, r, s.HTMLMaxBytes); err != nil {
+		srv.writeError(w, rid, err)
+		return
+	}
+
 	// BR-3: wait controls are Gotenberg-only (Aspose has no JS engine — D4).
 	waitOpts, werr := parseWaitOptions(r, engine)
 	if werr != nil {
@@ -105,8 +110,8 @@ func (srv *Server) convertHTML(w http.ResponseWriter, r *http.Request, engine st
 	defer file.Close()
 	di.inputFilename = fh.Filename
 
-	scratchDir := joinScratch(s.ScratchDir, rid)
-	if err := ensureDir(scratchDir); err != nil {
+	scratchDir, err := newScratchDir(s.ScratchDir, rid)
+	if err != nil {
 		srv.writeError(w, rid, oerrors.NewRender(nil, -1, "scratch mkdir: "+err.Error()))
 		return
 	}

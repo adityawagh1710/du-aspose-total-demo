@@ -83,7 +83,12 @@ func Probe(ctx context.Context, s *config.Settings, inputPath string, format typ
 	if lite := ProbeLite(ctx, inputPath, format); lite != nil {
 		return *lite, nil
 	}
+	return ProbeWorker(ctx, s, inputPath, format, requestID)
+}
 
+// ProbeWorker runs the full Aspose probe (the document is loaded and
+// paginated), so its page count is exact, unlike ProbeLite's metadata.
+func ProbeWorker(ctx context.Context, s *config.Settings, inputPath string, format types.FormatName, requestID string) (types.ProbeResult, error) {
 	stdout, _, err := worker.RunWorker(ctx, s, "probe", inputPath, format, "", nil, requestID, nil)
 	if err == nil {
 		return ParseProbeJSON(stdout)

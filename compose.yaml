@@ -34,8 +34,14 @@ services:
       # Persistent cache directory. Survives container recreates.
       - office-convert-cache:/cache
     environment:
-      OFFICE_CONVERT_MAX_JOBS: "2"
-      OFFICE_CONVERT_PARALLEL: "4"
+      # Memory budget: MAX_JOBS x PARALLEL x WORKER_RAM_BYTES (and
+      # MAX_JOBS x XLSX_MAX_POOL_SIZE x WORKER_RAM_BYTES) must fit in
+      # mem_limit + swap (memswap_limit, 6g below). Otherwise the cgroup OOM
+      # killer fires before any worker's RLIMIT_AS, the per-chunk OOM ->
+      # subdivide retry never runs, and it may kill the orchestrator itself.
+      # Enforced by internal/config TestComposeMemoryBudget.
+      OFFICE_CONVERT_MAX_JOBS: "1"
+      OFFICE_CONVERT_PARALLEL: "2"
       OFFICE_CONVERT_LOG_FORMAT: "human"
       OFFICE_CONVERT_LOG_LEVEL: "info"
       OFFICE_CONVERT_CHUNK_TIMEOUT_SECONDS: "1800"
@@ -44,8 +50,8 @@ services:
       OFFICE_CONVERT_HEARTBEAT_MS: "${OFFICE_CONVERT_HEARTBEAT_MS:-2000}"
       OFFICE_CONVERT_POOL_MIN_CHUNKS: "${OFFICE_CONVERT_POOL_MIN_CHUNKS:-1}"
       OFFICE_CONVERT_FORK_AFTER_LOAD: "${OFFICE_CONVERT_FORK_AFTER_LOAD:-1}"
-      OFFICE_CONVERT_XLSX_MAX_POOL_SIZE: "${OFFICE_CONVERT_XLSX_MAX_POOL_SIZE:-4}"
-      OFFICE_CONVERT_WORKER_RAM_BYTES: "6442450944"
+      OFFICE_CONVERT_XLSX_MAX_POOL_SIZE: "${OFFICE_CONVERT_XLSX_MAX_POOL_SIZE:-2}"
+      OFFICE_CONVERT_WORKER_RAM_BYTES: "3221225472"  # 3 GiB; 1 x 2 x 3 GiB = 6 GiB
       OFFICE_CONVERT_CACHE_DIR: "/cache"
       HOME: "/tmp"
       # ---- S3 source/sink integration (LocalStack-backed for local dev) ----
@@ -97,7 +103,7 @@ services:
     # in internal/netpolicy/netpolicy.go — keep the two literally in sync.
     command:
       - "gotenberg"
-      - "--chromium-deny-list=^https?://(?:[^@/]*@)?(?:localhost|[^/:.]+|[^/:]*\\.localhost|127\\.[0-9.]+|0\\.0\\.0\\.0|10\\.[0-9.]+|192\\.168\\.[0-9.]+|172\\.(?:1[6-9]|2[0-9]|3[01])\\.[0-9.]+|169\\.254\\.[0-9.]+|\\[::1\\]|\\[[fF][cdCD][0-9a-fA-F]{2}:[^\\]]*\\]|\\[[fF][eE][89abAB][0-9a-fA-F]:[^\\]]*\\])(?::[0-9]+)?(?:[/?#]|$)"
+      - "--chromium-deny-list=^https?://(?:[^@/]*@)?(?:localhost|[^/:.]+|[^/:]*\\.localhost|127\\.[0-9.]+|0\\.[0-9.]+|10\\.[0-9.]+|192\\.168\\.[0-9.]+|172\\.(?:1[6-9]|2[0-9]|3[01])\\.[0-9.]+|169\\.254\\.[0-9.]+|\\[::[^\\]]*\\]|\\[[fF][cdCD][0-9a-fA-F]{2}:[^\\]]*\\]|\\[[fF][eE][89abAB][0-9a-fA-F]:[^\\]]*\\])\\.?(?::[0-9]+)?(?:[/?#]|$)|^file:(?:[^/]|/[^/]|//[^/]|///(?:[^t]|t[^m]|tm[^p]|tmp[^/]))"
       # Above the orchestrator's 120s client timeout so the client decides
       # when a conversion is dead (clean error mapping).
       - "--api-timeout=130s"

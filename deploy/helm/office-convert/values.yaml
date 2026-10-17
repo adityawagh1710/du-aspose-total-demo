@@ -174,36 +174,27 @@ ingress:
   # websocket. 300 s matches Streamlit's own server.keepAlive default.
   idleTimeoutSeconds: 300
   apiHealthcheckPath: /health
-  uiHealthcheckPath: /_stcore/health
+  uiHealthcheckPath: /
 
 # ============================================================
-# UI (Streamlit test dashboard)
+# UI (Next.js operator dashboard, ui/)
 # ============================================================
-# The UI is a Streamlit app (office_convert_ui/app.py) that drives the API
-# for manual QA. It runs as a separate Deployment+Service in the same
-# namespace and talks to the API via in-cluster DNS (so port-forward and
-# NLB access give the same UI experience).
-#
-# Three docker-socket-backed widgets in office_convert_ui/app.py degrade silently to
-# empty values on EKS (no /var/run/docker.sock): the CPU/RAM tiles, the
-# worker process table, and the events feed. Core conversion + timing
-# charts + heartbeats + progress all work because they come from the API.
+# Separate Deployment+Service in the same namespace. The container listens
+# on 3000; the Service keeps port 8501 so the Ingress and portforward.sh are
+# unchanged. Its /api proxy reaches the API via in-cluster DNS.
 ui:
   enabled: true
-  # Browser-facing API URL — used for iframes the operator's browser
-  # loads directly (e.g. /v1/dashboard embedded panel). The browser
-  # cannot resolve the in-cluster service DNS the UI pod uses for its
-  # own server-side calls (`API_URL`), so this must be the external ALB
-  # hostname of the API Ingress.
+  # Browser-facing API base URL. The UI embeds <publicApiUrl>/v1/dashboard
+  # as an iframe (NEXT_PUBLIC_DASHBOARD_URL). The browser cannot resolve
+  # the in-cluster service DNS the UI pod uses for its own server-side
+  # calls (`API_URL`), so this must be the external ALB hostname of the
+  # API Ingress.
   #
   # Defaults to empty → fall through to the in-cluster service URL,
   # which is correct ONLY for single-origin local-port-forward dev.
   # On dev05, set this in your overlay:
   #   ui:
   #     publicApiUrl: "https://office-convert-api-dev-sandbox-v1.dev05.k8s.opus2dev.com"
-  # OR (image-only roll path) `kubectl set env deploy/office-convert-ui
-  # PUBLIC_API_URL=https://...` to preserve live patches per the
-  # deploy-workflow carve-out.
   publicApiUrl: ""
   image:
     # Filled in at install time:
@@ -233,23 +224,21 @@ ui:
     limits:
       cpu: "500m"
       memory: "4Gi"
-  # Streamlit server flags surfaced as env vars in the deployment.
-  # XSRF off because port-forward changes the request origin and Streamlit's
-  # default XSRF check rejects file uploads otherwise (the typical "AxiosError
-  # 403 on upload" failure). UI is internal-only with no auth in v1, so XSRF
-  # adds no real security here.
-  streamlit:
-    enableCORS: false
-    enableXsrfProtection: false
-    # Max file size Streamlit's file_uploader accepts (MiB; Streamlit
-    # multiplies by 1024*1024). Default is 200; raised to 1024 so the UI
-    # matches the API's 1 GiB `max_input_bytes` ceiling. 500 MB is the
-    # comfortable working ceiling; uploads >500 MB risk pod OOM on K8s
-    # (no swap), so the UI surfaces them but they may fail mid-conversion.
-    maxUploadSizeMb: 1024
-  # Dockerfile.ui doesn't set a USER, so the container runs as root. The
-  # shared podSecurityContext (runAsNonRoot: true) would block this pod from
-  # starting, so the UI gets its own empty securityContexts.
-  # TODO: harden Dockerfile.ui to run as non-root and remove these overrides.
-  podSecurityContext: {}
-  containerSecurityContext: {}
+  # ui/Dockerfile runs as the image's `node` user (uid/gid 1000), so the pod
+  # can be fully locked down. The root filesystem is read-only; Next.js's
+  # only writable paths (.next/cache, /tmp) are emptyDir mounts.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
