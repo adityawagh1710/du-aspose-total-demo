@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -130,6 +131,41 @@ func TestHostileRequestIDCannotEscapeScratch(t *testing.T) {
 		_, err = os.Stat(srv.settings.LicensePath)
 		require.NoError(t, err, "rid %q deleted files outside the scratch dir", rid)
 	}
+}
+
+// An upload far past the size cap is rejected as input_too_large without the
+// whole body being spooled first (MaxBytesReader stops the multipart parse).
+func TestOversizedUploadRejectedBeforeFullParse(t *testing.T) {
+	srv := buildTestServer(t)
+	srv.settings.HTMLMaxBytes = 1024
+	big := "<!doctype html><html><body>" + strings.Repeat("x", 3<<20) + "</body></html>"
+	resp := postMultipart(t, srv, "/v1/convert/html/aspose", "page.html", big, nil)
+	require.Equal(t, 400, resp.StatusCode)
+	assert.Equal(t, "input_too_large", decodeDiag(t, resp)["failure_class"])
+}
+
+// A failure after the first PDF byte must abort the connection: ending the
+// chunked body cleanly handed clients a truncated PDF with status 200.
+func TestMidStreamFailureAbortsResponse(t *testing.T) {
+	srv := buildTestServer(t)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &streamWriter{w: w, headers: map[string]string{"Content-Type": "application/pdf"}}
+		if f, ok := w.(http.Flusher); ok {
+			sw.flusher = f
+		}
+		di := dispatchInfo{rid: "midstream", t0: time.Now(), format: "docx"}
+		srv.finishStream(sw, di, t.TempDir(), func(dst io.Writer) error {
+			_, _ = io.WriteString(dst, "%PDF-1.7 partial")
+			return errors.New("qpdf died mid-merge")
+		})
+	}))
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	_, err = io.ReadAll(resp.Body)
+	require.Error(t, err, "truncated stream must not read as a complete body")
 }
 
 func TestValidRequestID(t *testing.T) {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -56,24 +57,6 @@ func (srv *Server) convert(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
 	s := srv.settings
 
-	_ = r.ParseMultipartForm(16 << 20) // 16 MB in-memory; larger parts spill to temp files
-	s3in := strings.TrimSpace(r.FormValue("s3_input"))
-	s3out := strings.TrimSpace(r.FormValue("s3_output"))
-	optionsStr := r.FormValue("options")
-	if optionsStr == "" {
-		optionsStr = "{}"
-	}
-	file, fh, ferr := r.FormFile("file")
-	if ferr == nil {
-		defer file.Close()
-	}
-	hasFile := ferr == nil && fh != nil && (fh.Filename != "" || fh.Size > 0)
-
-	di := dispatchInfo{rid: rid, t0: t0, source: "ui"}
-	if s3in != "" {
-		di.source = "cross"
-	}
-
 	// Per-IP rate limit (before semaphore so 429s don't hold a slot).
 	rateHeaders := map[string]string{}
 	if srv.rl != nil {
@@ -106,6 +89,29 @@ func (srv *Server) convert(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer release()
+
+	// Parse the upload only once the client has passed the rate limit and got
+	// a slot, and never past the size cap.
+	if err := parseUpload(w, r, s.MaxInputBytes); err != nil {
+		srv.writeError(w, rid, err)
+		return
+	}
+	s3in := strings.TrimSpace(r.FormValue("s3_input"))
+	s3out := strings.TrimSpace(r.FormValue("s3_output"))
+	optionsStr := r.FormValue("options")
+	if optionsStr == "" {
+		optionsStr = "{}"
+	}
+	file, fh, ferr := r.FormFile("file")
+	if ferr == nil {
+		defer file.Close()
+	}
+	hasFile := ferr == nil && fh != nil && (fh.Filename != "" || fh.Size > 0)
+
+	di := dispatchInfo{rid: rid, t0: t0, source: "ui"}
+	if s3in != "" {
+		di.source = "cross"
+	}
 
 	// Options (tolerant).
 	opts := parseOptions(optionsStr)
@@ -324,9 +330,11 @@ func (srv *Server) finishStream(sw *streamWriter, di dispatchInfo, scratchDir st
 			srv.writeError(sw.w, di.rid, err)
 			return
 		}
-		// Already streaming — can't switch to a JSON error; just record.
+		// Already streaming, so a JSON error is impossible. Returning would
+		// end the chunked body cleanly and the client would accept a
+		// truncated PDF as a 200; abort the connection instead.
 		srv.recordConversion(di, "failed", errCode(err), sw.n)
-		return
+		panic(http.ErrAbortHandler)
 	}
 
 	if s3tmp != nil {
@@ -382,6 +390,21 @@ func errCode(err error) string {
 		return string(oe.FailureClass)
 	}
 	return "render_failed"
+}
+
+// multipartSlack covers multipart boundaries and the small non-file fields.
+const multipartSlack = 1 << 20
+
+// parseUpload caps the request body at maxBytes (plus multipart overhead)
+// before parsing, so an oversized upload is rejected instead of being spooled
+// to disk in full. Other parse errors are left for the field checks to report.
+func parseUpload(w http.ResponseWriter, r *http.Request, maxBytes int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+multipartSlack)
+	var mbe *http.MaxBytesError
+	if err := r.ParseMultipartForm(16 << 20); errors.As(err, &mbe) {
+		return oerrors.NewInputTooLarge(max(r.ContentLength, mbe.Limit+1), maxBytes)
+	}
+	return nil
 }
 
 // streamUploadToFile copies an uploaded multipart file to dest, enforcing the
