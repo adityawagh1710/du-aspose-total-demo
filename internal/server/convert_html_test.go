@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -95,6 +96,21 @@ func TestHTMLGotenbergSuccessAndTelemetry(t *testing.T) {
 	require.Contains(t, stats, "per_engine_html")
 	perEngine := stats["per_engine_html"].(map[string]any)
 	assert.Contains(t, perEngine, "gotenberg")
+}
+
+// A conversion that completes in under 1ms must still count toward stats.
+// Truncating its duration to 0 made stats drop it, so per_engine_html went
+// missing on fast CI runners (flaky TestHTMLGotenbergSuccessAndTelemetry).
+func TestSubMillisecondConversionCountsInStats(t *testing.T) {
+	srv := buildTestServer(t)
+	srv.recordConversion(dispatchInfo{
+		rid: "sub-ms", t0: time.Now(), source: "upload", format: "html", engine: "gotenberg",
+	}, "success", "", 10)
+
+	stats := decodeDiag(t, do(t, srv, "GET", "/v1/conversions/stats", ""))
+	require.Contains(t, stats, "per_engine_html")
+	assert.Contains(t, stats["per_engine_html"].(map[string]any), "gotenberg")
+	assert.Contains(t, stats["per_format"].(map[string]any), "html")
 }
 
 func TestHTMLGotenbergEngineDown(t *testing.T) {

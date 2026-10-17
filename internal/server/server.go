@@ -424,6 +424,16 @@ func (srv *Server) orchestratorDeps() orchestrator.Deps {
 	return orchestrator.Deps{Settings: srv.settings, Cache: srv.cache, Stores: srv.stores}
 }
 
+// elapsedMS returns whole milliseconds since t0, rounding sub-millisecond
+// durations up to 1. conversionsStats treats 0 as "no duration recorded", so
+// truncating a fast conversion to 0 would silently drop it from the stats.
+func elapsedMS(t0 time.Time) int {
+	if ms := int(time.Since(t0).Milliseconds()); ms > 0 {
+		return ms
+	}
+	return 1
+}
+
 func (srv *Server) recordConversion(d dispatchInfo, status, errorCode string, outSize int64) {
 	rec := obs.ConversionRecord{
 		RequestID:    d.rid,
@@ -431,7 +441,7 @@ func (srv *Server) recordConversion(d dispatchInfo, status, errorCode string, ou
 		Source:       d.source,
 		Format:       d.format,
 		Engine:       d.engine,
-		DurationMS:   int(time.Since(d.t0).Milliseconds()),
+		DurationMS:   elapsedMS(d.t0),
 		Status:       status,
 	}
 	if d.inputFilename != "" {
