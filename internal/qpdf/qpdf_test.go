@@ -3,9 +3,11 @@ package qpdf
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,6 +48,35 @@ func TestConcatStreamingStreamsAndTees(t *testing.T) {
 	teed, err := os.ReadFile(teePath)
 	require.NoError(t, err)
 	require.Equal(t, "MERGEDPDFBYTES", string(teed))
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("client gone") }
+
+// When the destination stops accepting bytes (client disconnected), qpdf must
+// be killed rather than left blocked on a full stdout pipe, which hung the
+// handler and leaked its job slot forever.
+func TestConcatStreamingDestWriteFailureDoesNotHang(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fakeqpdf")
+	// One process (like real qpdf) that writes to stdout forever.
+	script := "#!/bin/sh\nexec yes\n"
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	orig := Binary
+	Binary = path
+	t.Cleanup(func() { Binary = orig })
+
+	done := make(chan error, 1)
+	go func() { done <- ConcatStreaming(context.Background(), []string{"a.pdf"}, failingWriter{}, "") }()
+	select {
+	case err := <-done:
+		var oe *oerrors.Error
+		require.ErrorAs(t, err, &oe)
+		require.Equal(t, types.MergeFailed, oe.FailureClass)
+	case <-time.After(10 * time.Second):
+		t.Fatal("ConcatStreaming hung after the destination write failed")
+	}
 }
 
 func TestConcatStreamingNoChunks(t *testing.T) {
