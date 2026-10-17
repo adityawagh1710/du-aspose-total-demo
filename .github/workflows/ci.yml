@@ -36,6 +36,13 @@ jobs:
       - name: go test (unit + property + golden parity gate)
         run: go test ./...
 
+      # Reachability-aware vulnerability check: fails only when our code
+      # actually calls a vulnerable function (stdlib or dependency), unlike
+      # Trivy's version match in security.yml. Also catches a stale Go
+      # toolchain in go.mod (stdlib CVEs).
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
   ui-test:
     name: Next.js lint + typecheck + build
     runs-on: ubuntu-latest
