@@ -97,7 +97,7 @@ services:
     # in internal/netpolicy/netpolicy.go — keep the two literally in sync.
     command:
       - "gotenberg"
-      - "--chromium-deny-list=^https?://(?:[^@/]*@)?(?:localhost|[^/:.]+|[^/:]*\\.localhost|127\\.[0-9.]+|0\\.0\\.0\\.0|10\\.[0-9.]+|192\\.168\\.[0-9.]+|172\\.(?:1[6-9]|2[0-9]|3[01])\\.[0-9.]+|169\\.254\\.[0-9.]+|\\[::1\\]|\\[[fF][cdCD][0-9a-fA-F]{2}:[^\\]]*\\]|\\[[fF][eE][89abAB][0-9a-fA-F]:[^\\]]*\\])(?::[0-9]+)?(?:[/?#]|$)"
+      - "--chromium-deny-list=^https?://(?:[^@/]*@)?(?:localhost|[^/:.]+|[^/:]*\\.localhost|127\\.[0-9.]+|0\\.[0-9.]+|10\\.[0-9.]+|192\\.168\\.[0-9.]+|172\\.(?:1[6-9]|2[0-9]|3[01])\\.[0-9.]+|169\\.254\\.[0-9.]+|\\[::[^\\]]*\\]|\\[[fF][cdCD][0-9a-fA-F]{2}:[^\\]]*\\]|\\[[fF][eE][89abAB][0-9a-fA-F]:[^\\]]*\\])\\.?(?::[0-9]+)?(?:[/?#]|$)|^file:(?:[^/]|/[^/]|//[^/]|///(?:[^t]|t[^m]|tm[^p]|tmp[^/]))"
       # Above the orchestrator's 120s client timeout so the client decides
       # when a conversion is dead (clean error mapping).
       - "--api-timeout=130s"
