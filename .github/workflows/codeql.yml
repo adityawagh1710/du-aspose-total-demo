@@ -1,0 +1,68 @@
+name: CodeQL
+
+# Static analysis of our own code (taint tracking from request input to
+# dangerous sinks: path traversal, XSS, SSRF, injection). Complements Trivy in
+# security.yml, which only checks dependencies and IaC config. Results go to
+# GitHub code scanning (Security tab) and annotate PR diffs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly Monday 06:00 UTC — picks up new CodeQL queries on unchanged code.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  security-events: write  # upload results to code scanning
+  actions: read
+
+jobs:
+  analyze:
+    name: codeql (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Go orchestrator (cmd/, internal/).
+          - language: go
+            build-mode: autobuild
+          # Next.js UI (ui/) plus the dashboard/landing templates' JS.
+          - language: javascript-typescript
+            build-mode: none
+          # The workflow files themselves (injection, over-broad permissions).
+          - language: actions
+            build-mode: none
+        # C++ (worker_cpp/) is not analyzed: CodeQL must compile it, and the
+        # Aspose SDK it links against isn't available in CI.
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # Default queries plus the extended security suite.
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
