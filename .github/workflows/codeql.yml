@@ -45,11 +45,11 @@ jobs:
         # C++ (worker_cpp/) is not analyzed: CodeQL must compile it, and the
         # Aspose SDK it links against isn't available in CI.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Go
         if: matrix.language == 'go'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum

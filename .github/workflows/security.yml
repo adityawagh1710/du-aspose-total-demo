@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Authenticate the Trivy vulnerability-DB pull from ghcr.io. Without this,
       # the DB is fetched anonymously and shared GitHub-runner IPs routinely hit
@@ -34,7 +34,7 @@ jobs:
       # The built-in GITHUB_TOKEN gives a per-token rate limit. (Aqua's
       # documented fix for trivy-action rate limiting.)
       - name: Log in to ghcr.io (for the Trivy DB)
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
